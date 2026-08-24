@@ -1,40 +1,132 @@
 #include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
 #include <fcntl.h>
 #include <unistd.h>
 #include <termios.h>
 #include <cstring>
 #include <cerrno>
-#include <string>
 #include <cstdlib>
 
 bool g_echo_enabled = true;
 
+// Структура для хранения одного правила из CSV
+struct Rule {
+    std::string pattern;
+    std::string response;
+};
+
+std::vector<Rule> g_rules;
+
+/**
+ * Функция сопоставления шаблона с поддержкой:
+ *   '.' - один любой символ
+ *   '*' - ноль или более любых символов
+ */
+bool match_pattern(const std::string& pattern, const std::string& str) {
+    size_t p = 0, s = 0;
+    size_t last_s = std::string::npos;
+    size_t star_p = std::string::npos;
+
+    while (s < str.length()) {
+        if (p < pattern.length() && (pattern[p] == '.' || pattern[p] == str[s])) {
+            p++;
+            s++;
+        } else if (p < pattern.length() && pattern[p] == '*') {
+            star_p = p;
+            p++;
+            last_s = s;
+        } else if (star_p != std::string::npos) {
+            p = star_p + 1;
+            last_s++;
+            s = last_s;
+        } else {
+            return false;
+        }
+    }
+
+    while (p < pattern.length() && pattern[p] == '*') {
+        p++;
+    }
+
+    return p == pattern.length();
+}
+
+/**
+ * Заменяет спецсимвол '|' из CSV-файла на стандартную последовательность CRLF ("\r\n")
+ */
+std::string replace_pipe_with_crlf(const std::string& input) {
+    std::string result;
+    for (char c : input) {
+        if (c == '|') {
+            result += "\r\n";
+        } else {
+            result += c;
+        }
+    }
+    return result;
+}
+
+/**
+ * Считывание правил из CSV-файла вида "ожидание=ответ"
+ */
+bool load_rules_from_csv(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Ошибка: не удалось открыть CSV файл " << filename << std::endl;
+        return false;
+    }
+
+    g_rules.clear();
+    std::string line;
+    while (std::getline(file, line)) {
+        // Удаляем '\r' при чтении файлов с переводами строк (CRLF - \r\n)
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        // Игнорируем пустые строки и комментарии
+        if (line.empty() || line[0] == '#') continue;
+
+        size_t pos = line.find('=');
+        if (pos != std::string::npos) {
+            std::string pattern = line.substr(0, pos);
+            std::string raw_response = line.substr(pos + 1);
+
+            Rule rule;
+            rule.pattern = pattern;
+            rule.response = replace_pipe_with_crlf(raw_response);
+            g_rules.push_back(rule);
+        }
+    }
+    file.close();
+    std::cout << "Загружено правил из CSV: " << g_rules.size() << std::endl;
+    return true;
+}
+
 void handle_at_command(int fd, const std::string& cmd) {
     if (cmd.empty()) return;
 
-    std::string response = "";
-
-    if (cmd == "AT") {
-        response = "OK\r\n";
-    } 
-    else if (cmd == "ATE0") {
+    // Управление программным эхом при получении команд ATE0 / ATE1
+    if (cmd == "ATE0") {
         g_echo_enabled = false;
-        response = "OK\r\n";
-    } 
-    else if (cmd == "ATE1") {
+    } else if (cmd == "ATE1") {
         g_echo_enabled = true;
-        response = "OK\r\n";
-    } 
-    else if (cmd == "ATI") {
-        response = "Arduino-Sim-Modem v1.0\r\nOK\r\n";
-    } 
-    else if (cmd == "AT+COPS?") { 
-        response = "+COPS: 0,0,\"Virtual-Network\"\r\nOK\r\n";
-    } 
-    else if (cmd == "AT+CPIN?") { 
-        response = "+CPIN: READY\r\nOK\r\n";
-    } 
-    else {
+    }
+
+    std::string response = "";
+    bool matched = false;
+
+    // Поиск совпадения по загруженным из CSV шаблонам
+    for (const auto& rule : g_rules) {
+        if (match_pattern(rule.pattern, cmd)) {
+            response = rule.response;
+            matched = true;
+            break;
+        }
+    }
+
+    if (!matched) {
         response = "ERROR\r\n";
     }
 
@@ -45,7 +137,12 @@ void handle_at_command(int fd, const std::string& cmd) {
 }
 
 int main() {
-    // 1. Создаем PTY Master напрямую в Linux (без использования socat)
+    // Загрузка словаря ожиданий
+    if (!load_rules_from_csv("at_commands.csv")) {
+        std::cerr << "Предупреждение: не удалось загрузить словарь из CSV! Будет возвращаться ERROR." << std::endl;
+    }
+
+    // 1. Создаем псевдотерминал TTY Master напрямую в Linux
     int master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (master_fd < 0) {
         std::cerr << "Ошибка posix_openpt: " << std::strerror(errno) << std::endl;
@@ -53,19 +150,19 @@ int main() {
     }
 
     if (grantpt(master_fd) != 0 || unlockpt(master_fd) != 0) {
-        std::cerr << "Ошибка настройки PTY" << std::endl;
+        std::cerr << "Ошибка настройки TTY" << std::endl;
         close(master_fd);
         return 1;
     }
 
     char* pts_name = ptsname(master_fd);
     if (!pts_name) {
-        std::cerr << "Не удалось получить имя PTY slave" << std::endl;
+        std::cerr << "Не удалось получить имя псевдотерминала TTY" << std::endl;
         close(master_fd);
         return 1;
     }
 
-    // 2. Создаем симлинк ./virtual-tty на реальное PTY-устройство (/dev/pts/X)
+    // 2. Создаем симлинк ./virtual-tty на реальное TTY-устройство (/dev/pts/X)
     const char* symlink_path = "./virtual-tty";
     unlink(symlink_path);
     if (symlink(pts_name, symlink_path) != 0) {
