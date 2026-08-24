@@ -5,11 +5,9 @@
 #include <cstring>
 #include <cerrno>
 #include <string>
+#include <cstdlib>
 
-//ошибка: теряется первый вводимый символ
-
-// Флаг программного эха (управляемый ATE0/ATE1)
-bool echo_enabled = true;
+bool g_echo_enabled = true;
 
 void handle_at_command(int fd, const std::string& cmd) {
     if (cmd.empty()) return;
@@ -20,11 +18,11 @@ void handle_at_command(int fd, const std::string& cmd) {
         response = "OK\r\n";
     } 
     else if (cmd == "ATE0") {
-        echo_enabled = false; // Меняем флаг без вызова tcsetattr
+        g_echo_enabled = false;
         response = "OK\r\n";
     } 
     else if (cmd == "ATE1") {
-        echo_enabled = true;
+        g_echo_enabled = true;
         response = "OK\r\n";
     } 
     else if (cmd == "ATI") {
@@ -47,55 +45,58 @@ void handle_at_command(int fd, const std::string& cmd) {
 }
 
 int main() {
-    const char* port_path = "./arduino-sim"; 
-
-    int serial_port = open(port_path, O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (serial_port < 0) {
-        std::cerr << "Ошибка открытия порта: " << std::strerror(errno) << std::endl;
-        return 1;
-    }
-    std::cout << "Потр открыт!" << std::endl;
-
-    struct termios tty;
-    if (tcgetattr(serial_port, &tty) != 0) {
-        std::cerr << "Ошибка tcgetattr: " << std::strerror(errno) << std::endl;
-        close(serial_port);
+    // 1. Создаем PTY Master напрямую в Linux (без использования socat)
+    int master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (master_fd < 0) {
+        std::cerr << "Ошибка posix_openpt: " << std::strerror(errno) << std::endl;
         return 1;
     }
 
-    // Переводим порт в чистый RAW-режим (отключаем ECHO, ICANON, ICRNL, OPOST ядра)
-    cfmakeraw(&tty);
-
-    tty.c_cc[VMIN] = 0;  
-    tty.c_cc[VTIME] = 0; 
-
-    if (tcsetattr(serial_port, TCSANOW, &tty) != 0) {
-        std::cerr << "Ошибка tcsetattr: " << std::strerror(errno) << std::endl;
-        close(serial_port);
+    if (grantpt(master_fd) != 0 || unlockpt(master_fd) != 0) {
+        std::cerr << "Ошибка настройки PTY" << std::endl;
+        close(master_fd);
         return 1;
     }
 
-    // Очищаем стартовый мусор после открытия порта socat/screen
-    tcflush(serial_port, TCIOFLUSH);
+    char* pts_name = ptsname(master_fd);
+    if (!pts_name) {
+        std::cerr << "Не удалось получить имя PTY slave" << std::endl;
+        close(master_fd);
+        return 1;
+    }
 
-    std::cout << "Модем запущен (Программное эхо). Ожидание AT-команд..." << std::endl;
+    // 2. Создаем симлинк ./virtual-tty на реальное PTY-устройство (/dev/pts/X)
+    const char* symlink_path = "./virtual-tty";
+    unlink(symlink_path);
+    if (symlink(pts_name, symlink_path) != 0) {
+        std::cerr << "Ошибка создания симлинка: " << std::strerror(errno) << std::endl;
+    }
+
+    std::cout << "Виртуальный порт создан: " << pts_name << std::endl;
+    std::cout << "Симлинк: " << symlink_path << std::endl;
+    std::cout << "Модем запущен. Ожидание AT-команд...\n" << std::endl;
 
     char buffer[1024];
     std::string command_accumulator = ""; 
 
     while (true) {
-        int num_bytes = read(serial_port, buffer, sizeof(buffer) - 1);
+        int num_bytes = read(master_fd, buffer, sizeof(buffer) - 1);
 
         if (num_bytes > 0) {
             for (int i = 0; i < num_bytes; ++i) {
                 char ch = buffer[i];
 
-                // 1. Программное эхо символов в screen
-                if (echo_enabled) {
+                if (ch == 0) continue; // Игнорируем null-байты инициализации
+
+                // 1. Программное эхо для отображения в терминале
+                if (g_echo_enabled) {
                     if (ch == '\r' || ch == '\n') {
-                        write(serial_port, "\r\n", 2);
-                    } else if (ch >= 32 || ch == '\b' || ch == 127) {
-                        write(serial_port, &ch, 1);
+                        write(master_fd, "\r\n", 2);
+                    } else if (ch == '\b' || ch == 127) {
+                        // Эхо стирания символа (Забой - Пробел - Забой)
+                        write(master_fd, "\b \b", 3);
+                    } else if (ch >= 32) {
+                        write(master_fd, &ch, 1);
                     }
                 }
 
@@ -107,7 +108,7 @@ int main() {
                     continue;
                 }
 
-                // 3. Накопление и обработка команды
+                // 3. Сборка команды по нажатию Enter
                 if (ch == '\r' || ch == '\n') {
                     while (!command_accumulator.empty() && 
                           (command_accumulator.back() == '\r' || command_accumulator.back() == '\n')) {
@@ -115,11 +116,11 @@ int main() {
                     }
 
                     if (!command_accumulator.empty()) {
-                        handle_at_command(serial_port, command_accumulator);
+                        handle_at_command(master_fd, command_accumulator);
                         command_accumulator.clear(); 
                     }
                 } else {
-                    if (ch != ' ' && ch >= 32) {
+                    if (ch >= 32) {
                         command_accumulator += ch;
                     }
                 }
@@ -134,6 +135,7 @@ int main() {
         usleep(10000); 
     }
 
-    close(serial_port);
+    unlink(symlink_path);
+    close(master_fd);
     return 0;
 }
