@@ -8,9 +8,27 @@
 #include <cstring>
 #include <cerrno>
 #include <cstdlib>
+#include <csignal>
+
+std::atomic<bool> AtModemSimulator::s_stop_requested{false};
 
 AtModemSimulator::~AtModemSimulator() {
     stop();
+}
+
+void AtModemSimulator::handle_signal(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        s_stop_requested = true;
+    }
+}
+
+void AtModemSimulator::setup_signal_handler() {
+    struct sigaction sa{};
+    sa.sa_handler = AtModemSimulator::handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
 }
 
 bool AtModemSimulator::load_rules_from_csv(const std::string& filename) {
@@ -42,6 +60,9 @@ bool AtModemSimulator::load_rules_from_csv(const std::string& filename) {
 }
 
 bool AtModemSimulator::start(const std::string& symlink_path) {
+    s_stop_requested = false;
+    setup_signal_handler();
+
     m_master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (m_master_fd < 0) {
         std::cerr << "Ошибка posix_openpt: " << std::strerror(errno) << std::endl;
@@ -69,7 +90,7 @@ bool AtModemSimulator::start(const std::string& symlink_path) {
 
     std::cout << "Виртуальный порт создан: " << pts_name << std::endl;
     std::cout << "Симлинк: " << m_symlink_path << std::endl;
-    std::cout << "Модем запущен. Ожидание AT-команд...\n" << std::endl;
+    std::cout << "Модем запущен. Ожидание AT-команд (Ctrl+C для выхода)...\n" << std::endl;
     return true;
 }
 
@@ -79,7 +100,7 @@ void AtModemSimulator::run() {
     m_running = true;
     char buffer[1024];
 
-    while (m_running) {
+    while (m_running && !s_stop_requested) {
         int num_bytes = read(m_master_fd, buffer, sizeof(buffer) - 1);
 
         if (num_bytes > 0) {
@@ -95,6 +116,9 @@ void AtModemSimulator::run() {
 
         usleep(10000);
     }
+
+    std::cout << "\nПолучен сигнал завершения. Завершение работы..." << std::endl;
+    stop();
 }
 
 void AtModemSimulator::stop() {
