@@ -10,6 +10,14 @@
 #include <cstdlib>
 #include <csignal>
 
+static void write_data(int fd, const void* buf, size_t count) {
+    if (fd < 0) return;
+    ssize_t bytes_written = write(fd, buf, count);
+    if (bytes_written < 0) {
+        std::cerr << "Ошибка записи в TTY: " << std::strerror(errno) << std::endl;
+    }
+}
+
 std::atomic<bool> AtModemSimulator::s_stop_requested{false};
 
 AtModemSimulator::~AtModemSimulator() {
@@ -198,7 +206,7 @@ void AtModemSimulator::handle_at_command(const std::string& cmd) {
         response = "ERROR\r\n";
     }
 
-    write(m_master_fd, response.c_str(), response.length());
+    write_data(m_master_fd, response.c_str(), response.length());
 
     std::cout << "\n[Входная команда]: " << cmd << std::endl;
     std::cout << "[Отправлен ответ]:\n" << response << "------------------------" << std::endl;
@@ -209,11 +217,11 @@ void AtModemSimulator::process_char(char ch) {
 
     if (m_echo_enabled) {
         if (ch == '\r' || ch == '\n') {
-            write(m_master_fd, "\r\n", 2);
+            write_data(m_master_fd, "\r\n", 2);
         } else if (ch == '\b' || ch == 127) {
-            write(m_master_fd, "\b \b", 3);
+            write_data(m_master_fd, "\b \b", 3);
         } else if (ch >= 32) {
-            write(m_master_fd, &ch, 1);
+            write_data(m_master_fd, &ch, 1);
         }
     }
 
