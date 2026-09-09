@@ -23,7 +23,7 @@ int main() {
     AtModemSimulator modem;
     std::string symlink_path = "./virtual-tty";
 
-    // 1. Загрузка правил соответствия команд и ответов из CSV-файла
+    // 1. Загрузка правил соответствия AT-команд и ответов из CSV-файла
     if (!modem.load_rules_from_csv("at_commands.csv")) {
         std::cerr << "Предупреждение: правила не загружены! На все команды будет возвращаться ERROR." << std::endl;
     }

@@ -70,7 +70,7 @@ bool AtModemSimulator::load_rules_from_csv(const std::string& filename) {
         if (pos != std::string::npos) {
             Rule rule;
             rule.pattern = line.substr(0, pos);
-            // Заменяем символы '|' на стандартные переносы строк CRLF (\r\n)
+            // Заменяем символы '|' на стандартные для AT-модемов переносы строк CRLF (\r\n)
             rule.response = replace_pipe_with_crlf(line.substr(pos + 1));
             m_rules.push_back(rule);
         }
@@ -248,7 +248,7 @@ void AtModemSimulator::handle_at_command(const std::string& cmd) {
 void AtModemSimulator::process_char(char ch) {
     if (ch == 0) return;
 
-    // Если эхо включено, дублируем вводимые клиентом символы обратно в порт
+    // Если эхо включено (ATE1), дублируем вводимые клиентом символы обратно в порт
     if (m_echo_enabled) {
         if (ch == '\r' || ch == '\n') {
             write_data(m_master_fd, "\r\n", 2);
