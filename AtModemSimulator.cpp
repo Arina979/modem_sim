@@ -19,30 +19,9 @@ static void write_data(int fd, const void* buf, size_t count) {
     }
 }
 
-// Флаг остановки
-std::atomic<bool> AtModemSimulator::s_stop_requested{false};
-
 AtModemSimulator::~AtModemSimulator() {
     // Гарантируем освобождение ресурсов и удаление симлинка при уничтожении объекта
     stop();
-}
-
-void AtModemSimulator::handle_signal(int signal) {
-    // В обработчике сигналов выставляется только атомарный флаг
-    if (signal == SIGINT || signal == SIGTERM) {
-        s_stop_requested = true;
-    }
-}
-
-void AtModemSimulator::setup_signal_handler() {
-    struct sigaction sa{};
-    sa.sa_handler = AtModemSimulator::handle_signal;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
-    // Перехватываем сигналы прерывания Ctrl+C (SIGINT) и завершения процесса (SIGTERM)
-    sigaction(SIGINT, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
 }
 
 bool AtModemSimulator::load_rules_from_csv(const std::string& filename) {
@@ -81,8 +60,6 @@ bool AtModemSimulator::load_rules_from_csv(const std::string& filename) {
 }
 
 bool AtModemSimulator::start(const std::string& symlink_path) {
-    s_stop_requested = false;
-    setup_signal_handler();
 
     // Открываем псевдотерминал PTY в неблокирующем режиме (O_NONBLOCK)
     m_master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
@@ -119,14 +96,14 @@ bool AtModemSimulator::start(const std::string& symlink_path) {
     return true;
 }
 
-void AtModemSimulator::run() {
+void AtModemSimulator::run(const std::atomic<bool>& stop_requested) {
     if (m_master_fd < 0) return;
 
     m_running = true;
     char buffer[1024];
 
     // Главный цикл считывания символов из PTY
-    while (m_running && !s_stop_requested) {
+    while (m_running && !stop_requested) {
         int num_bytes = read(m_master_fd, buffer, sizeof(buffer) - 1);
 
         if (num_bytes > 0) {

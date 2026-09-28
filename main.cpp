@@ -1,6 +1,29 @@
 #include "AtModemSimulator.hpp"
 #include <iostream>
 #include <sys/wait.h>
+#include <csignal>
+#include <atomic>
+
+// Атомарный флаг для остановки из обработчика сигналов
+static std::atomic<bool> g_stop_requested{false};
+
+// Обработчик сигналов (SIGINT, SIGTERM)
+void handle_signal(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        g_stop_requested = true;
+    }
+}
+
+// Настройка сигналов
+void setup_signal_handler() {
+    struct sigaction sa{};
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+}
 
 // Запуска утилиты `screen` в новом окне терминала
 void open_screen_in_new_terminal(const std::string& tty_path) {
@@ -20,6 +43,8 @@ void open_screen_in_new_terminal(const std::string& tty_path) {
 }
 
 int main() {
+    setup_signal_handler();
+
     AtModemSimulator modem;
     std::string symlink_path = "./virtual-tty";
 
@@ -37,7 +62,7 @@ int main() {
     open_screen_in_new_terminal(symlink_path);
 
     // 4. Запуск основного регистратора и обработчика событий модема
-    modem.run();
+    modem.run(g_stop_requested);
 
     return 0;
 }

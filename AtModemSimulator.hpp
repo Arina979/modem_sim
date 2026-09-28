@@ -40,7 +40,7 @@ public:
      * Запускает главный цикл обработки входящих данных из PTY.
      * Блокирует выполнение до получения сигнала завершения (SIGINT/SIGTERM) или вызова stop().
      */
-    void run();
+    void run(const std::atomic<bool>& stop_requested);
 
     // Останавливает работу модема, закрывает PTY дескриптор и удаляет символическую ссылку
     void stop();
@@ -52,14 +52,6 @@ private:
     std::string m_symlink_path;           // Cимволическая ссылке на PTY
     std::string m_command_accumulator;    // Накопительный буфер для сборки текущей AT-команды посимвольно
     std::vector<Rule> m_rules;            // Список загруженных правил (шаблон -> ответ)
-
-    static std::atomic<bool> s_stop_requested;  ///< Атомарный флаг запроса остановки от обработчика сигналов
-    
-    // Настраивает обработчики системных сигналов (SIGINT, SIGTERM) для корректного завершения
-    static void setup_signal_handler();
-
-    // Функция-обработчик сигналов Linux
-    static void handle_signal(int signal);
 
     // Проверяет соответствие строки заданному шаблону (Wildcard matching)
     static bool match_pattern(const std::string& pattern, const std::string& str);
